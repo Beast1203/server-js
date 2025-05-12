@@ -1,6 +1,6 @@
 const express = require("express");
 const bodyParser = require("body-parser");
-const { Pool } = require("pg"); // Replace sqlite3 with pg
+const sqlite3 = require("sqlite3").verbose();
 const path = require("path");
 const cors = require("cors");
 
@@ -9,52 +9,59 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(cors()); // Enable CORS for all routes
 
-// PostgreSQL connection configuration
-const pool = new Pool({
-  user: 'postgres',
-  host: 'localhost',
-  database: 'myapp',
-  password: 'Kashiba@00',
-  port: 5432,
-});
+const dbPath = path.join(__dirname, "data.db"); // Path to the SQLite database file
+
+const db = new sqlite3.Database(dbPath);
 
 // Check and update table structure
-async function checkAndUpdateTableStructure(tableName, tableStructure) {
-  try {
-    // Check if table exists
-    const tableExistsQuery = `
-      SELECT EXISTS (
-        SELECT FROM information_schema.tables 
-        WHERE table_schema = 'public' 
-        AND table_name = $1
-      )
-    `;
-    const tableExists = await pool.query(tableExistsQuery, [tableName]);
-    
-    if (!tableExists.rows[0].exists) {
-      console.log(`Creating ${tableName} table...`);
-      await pool.query(tableStructure);
-      console.log(`Created ${tableName} table successfully`);
-      
-      if (tableName === "users") {
-        await createDefaultAdminUser();
+function checkAndUpdateTableStructure(tableName, tableStructure) {
+  const existingTableStructureQuery = `SELECT sql FROM sqlite_master WHERE type='table' AND name='${tableName}'`;
+
+  return new Promise((resolve, reject) => {
+    db.get(existingTableStructureQuery, (err, row) => {
+      if (err) {
+        console.error(`Error checking if ${tableName} table exists:`, err);
+        reject(err);
+      } else {
+        const existingTableStructure =
+          row && row.sql ? row.sql.toLowerCase() : "";
+        const newTableStructure = tableStructure.toLowerCase();
+
+        if (existingTableStructure !== newTableStructure) {
+          console.log(`Updating ${tableName} table structure...`);
+          const dropTableQuery = `DROP TABLE IF EXISTS ${tableName}`;
+
+          db.run(dropTableQuery, (err) => {
+            if (err) {
+              console.error(`Error dropping ${tableName} table:`, err);
+              reject(err);
+            } else {
+              const createTableQuery = tableStructure;
+
+              db.run(createTableQuery, (err) => {
+                if (err) {
+                  console.error(`Error creating ${tableName} table:`, err);
+                  reject(err);
+                } else {
+                  console.log(
+                    `Updated ${tableName} table structure successfully`
+                  );
+                  if (tableName === "users") {
+                    createDefaultAdminUser().then(resolve).catch(reject);
+                  } else {
+                    resolve();
+                  }
+                }
+              });
+            }
+          });
+        } else {
+          console.log(`${tableName} table structure is up to date`);
+          resolve();
+        }
       }
-    } else {
-      console.log(`${tableName} table already exists`);
-      // In PostgreSQL, we'd typically use ALTER TABLE statements to modify tables
-      // For simplicity in migration, we'll recreate the table if needed
-      await pool.query(`DROP TABLE IF EXISTS ${tableName} CASCADE`);
-      await pool.query(tableStructure);
-      console.log(`Updated ${tableName} table structure successfully`);
-      
-      if (tableName === "users") {
-        await createDefaultAdminUser();
-      }
-    }
-  } catch (err) {
-    console.error(`Error managing ${tableName} table:`, err);
-    throw err;
-  }
+    });
+  });
 }
 
 // Define table structures
@@ -63,10 +70,10 @@ const tableStructures = [
     tableName: "users",
     structure: `
       CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        username VARCHAR(255),
-        password VARCHAR(255),
-        email VARCHAR(255)
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username VARCHAR,
+        password VARCHAR,
+        email VARCHAR
       )
     `,
   },
@@ -74,10 +81,10 @@ const tableStructures = [
     tableName: "items",
     structure: `
       CREATE TABLE IF NOT EXISTS items (
-        id SERIAL PRIMARY KEY,
-        item_name VARCHAR(255),
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        item_name VARCHAR,
         quantity INTEGER,
-        type VARCHAR(255)
+        type VARCHAR
       )
     `,
   },
@@ -85,9 +92,9 @@ const tableStructures = [
     tableName: "orders",
     structure: `
       CREATE TABLE IF NOT EXISTS orders (
-        id SERIAL PRIMARY KEY,
-        customer_name VARCHAR(255),
-        item_name VARCHAR(255),
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_name VARCHAR,
+        item_name VARCHAR,
         date_of_order DATE,
         quantity INTEGER,
         date_of_delivery DATE
@@ -98,9 +105,9 @@ const tableStructures = [
     tableName: "complete_order",
     structure: `
       CREATE TABLE IF NOT EXISTS complete_order (
-        id SERIAL PRIMARY KEY,
-        customer_name VARCHAR(255),
-        item_name VARCHAR(255),
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_name VARCHAR,
+        item_name VARCHAR,
         date_of_order DATE,
         quantity INTEGER,
         date_of_delivery DATE
@@ -121,28 +128,34 @@ async function createOrUpdateTableStructures() {
 }
 
 // Function to create the default admin user
-async function createDefaultAdminUser() {
-  try {
-    // Check if admin exists
-    const adminCheck = await pool.query(
-      "SELECT * FROM users WHERE username = $1",
-      ["admin"]
-    );
-    
-    if (adminCheck.rows.length === 0) {
-      console.log("Creating default admin user...");
-      await pool.query(
-        "INSERT INTO users (username, password, email) VALUES ($1, $2, $3)",
-        ["admin", "admin", "admin@example.com"]
-      );
-      console.log("Default admin user created successfully");
-    } else {
-      console.log("Default admin user already exists");
-    }
-  } catch (err) {
-    console.error("Error creating default admin user:", err);
-    throw err;
-  }
+function createDefaultAdminUser() {
+  return new Promise((resolve, reject) => {
+    // Add default admin user if it doesn't exist
+    db.get("SELECT * FROM users WHERE username = 'admin'", (err, row) => {
+      if (err) {
+        console.error("Error checking admin user:", err);
+        reject(err);
+      } else if (!row) {
+        console.log("Creating default admin user...");
+        db.run(
+          "INSERT INTO users (username, password, email) VALUES (?, ?, ?)",
+          ["admin", "admin", "admin@example.com"],
+          function (err) {
+            if (err) {
+              console.error("Error creating default admin user:", err);
+              reject(err);
+            } else {
+              console.log("Default admin user created successfully");
+              resolve();
+            }
+          }
+        );
+      } else {
+        console.log("Default admin user already exists");
+        resolve();
+      }
+    });
+  });
 }
 
 // Middleware for handling errors
@@ -151,175 +164,217 @@ function errorHandler(err, req, res, next) {
   res.status(500).json({ message: "Internal server error" });
 }
 
+
+
+
 // Remove an order
-app.post("/deleteData", async (req, res) => {
+app.post("/deleteData", (req, res) => {
   const { itemId } = req.body;
   if (itemId) {
-    try {
-      const result = await pool.query("DELETE FROM orders WHERE id = $1", [itemId]);
-      if (result.rowCount > 0) {
+    db.run("DELETE FROM orders WHERE id = ?", [itemId], function (err) {
+      if (err) {
+        console.error("Error during data deletion:", err);
+        res.status(500).json({ message: "Internal server error" });
+      } else if (this.changes > 0) {
         res.status(200).json({ message: "Data deleted successfully" });
       } else {
         res.status(404).json({ message: "Data not found" });
       }
-    } catch (err) {
-      console.error("Error during data deletion:", err);
-      res.status(500).json({ message: "Internal server error" });
-    }
+    });
   } else {
     res.status(400).json({ message: "Invalid item ID" });
   }
 });
 
+
+
 // Transfer selected order data from orders table to complete_order table
-app.post("/transferData", async (req, res) => {
+app.post("/transferData", (req, res) => {
   const { itemId } = req.body;
 
   if (itemId) {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-      
-      const transferQuery = `
-        INSERT INTO complete_order (customer_name, item_name, date_of_order, quantity, date_of_delivery)
-        SELECT customer_name, item_name, date_of_order, quantity, date_of_delivery
-        FROM orders
-        WHERE id = $1
-      `;
-      await client.query(transferQuery, [itemId]);
-      
-      const deleteQuery = "DELETE FROM orders WHERE id = $1";
-      await client.query(deleteQuery, [itemId]);
-      
-      await client.query('COMMIT');
-      res.status(200).json({ message: "Data transferred and deleted successfully" });
-    } catch (err) {
-      await client.query('ROLLBACK');
-      console.error("Error during data transfer:", err);
-      res.status(500).json({ message: "Internal server error" });
-    } finally {
-      client.release();
-    }
+    const transferQuery = `
+      INSERT INTO complete_order (customer_name, item_name, date_of_order, quantity, date_of_delivery)
+      SELECT customer_name, item_name, date_of_order, quantity, date_of_delivery
+      FROM orders
+      WHERE id = ?
+    `;
+
+    const deleteQuery = `
+      DELETE FROM orders
+      WHERE id = ?
+    `;
+
+    db.serialize(async () => {
+      try {
+        db.run("BEGIN TRANSACTION");
+        await new Promise((resolve, reject) => {
+          db.run(transferQuery, [itemId], (transferErr) => {
+            if (transferErr) {
+              console.error("Error transferring data:", transferErr);
+              reject(transferErr);
+            } else {
+              resolve();
+            }
+          });
+        });
+        await new Promise((resolve, reject) => {
+          db.run(deleteQuery, [itemId], (deleteErr) => {
+            if (deleteErr) {
+              console.error("Error deleting data:", deleteErr);
+              reject(deleteErr);
+            } else {
+              resolve();
+            }
+          });
+        });
+        db.run("COMMIT");
+        res
+          .status(200)
+          .json({ message: "Data transferred and deleted successfully" });
+      } catch (err) {
+        console.error("Error during data transfer:", err);
+        db.run("ROLLBACK");
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
   } else {
     res.status(400).json({ message: "Invalid item ID" });
   }
 });
 
+
+
 // User login
-app.post("/login", async (req, res) => {
+app.post("/login", (req, res) => {
   const { username, password } = req.body;
 
   if (username && password) {
-    try {
-      const result = await pool.query(
-        "SELECT * FROM users WHERE username = $1 AND password = $2",
-        [username, password]
-      );
-      
-      if (result.rows.length > 0) {
-        console.log(`User '${username}' logged in`);
-        res.status(200).json({ message: "success" });
-      } else {
-        res.status(401).json({ message: "Invalid username or password" });
+    db.get(
+      "SELECT * FROM users WHERE username = ? AND password = ?",
+      [username, password],
+      (err, row) => {
+        if (err) {
+          console.error("Error during login:", err);
+          res.status(500).json({ message: "Internal server error" });
+        } else if (row) {
+          console.log(`User '${username}' logged in`);
+          res.status(200).json({ message: "success" });
+        } else {
+          res.status(401).json({ message: "Invalid username or password" });
+        }
       }
-    } catch (err) {
-      console.error("Error during login:", err);
-      res.status(500).json({ message: "Internal server error" });
-    }
+    );
   } else {
     res.status(400).json({ message: "Invalid username or password" });
   }
 });
 
 // Retrieve the list of items
-app.get("/itemList", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT * FROM items");
-    res.json(result.rows);
-  } catch (err) {
-    console.error("Error retrieving item list:", err);
-    res.status(500).json({ message: "Internal server error" });
-  }
+app.get("/itemList", (req, res) => {
+  db.all("SELECT * FROM items", (err, rows) => {
+    if (err) {
+      console.error("Error retrieving item list:", err);
+      res.status(500).json({ message: "Internal server error" });
+    } else {
+      res.json(rows);
+    }
+  });
 });
 
+
+
+
 // Update an item's quantity
-app.post("/updateItem", async (req, res) => {
+app.post("/updateItem", (req, res) => {
   const { id, quantity } = req.body;
 
   if (id && quantity) {
-    try {
-      const result = await pool.query(
-        "UPDATE items SET quantity = $1 WHERE id = $2",
-        [quantity, id]
-      );
-      
-      if (result.rowCount > 0) {
-        res.status(200).json({ message: "Item quantity updated successfully" });
-      } else {
-        res.status(404).json({ message: "Item not found" });
+    db.run(
+      "UPDATE items SET quantity = ? WHERE id = ?",
+      [quantity, id],
+      function (err) {
+        if (err) {
+          console.error("Error during item update:", err);
+          res.status(500).json({ message: "Internal server error" });
+        } else if (this.changes > 0) {
+          res
+            .status(200)
+            .json({ message: "Item quantity updated successfully" });
+        } else {
+          res.status(404).json({ message: "Item not found" });
+        }
       }
-    } catch (err) {
-      console.error("Error during item update:", err);
-      res.status(500).json({ message: "Internal server error" });
-    }
+    );
   } else {
     res.status(400).json({ message: "Invalid item ID or quantity" });
   }
 });
 
 // Retrieve the list of orders
-app.get("/orderList", async (req, res) => {
-  try {
-    const result = await pool.query("SELECT * FROM orders");
-    res.json(result.rows);
-  } catch (err) {
-    console.error("Error retrieving order list:", err);
-    res.status(500).json({ message: "Internal server error" });
-  }
+app.get("/orderList", (req, res) => {
+  db.all("SELECT * FROM orders", (err, rows) => {
+    if (err) {
+      console.error("Error retrieving order list:", err);
+      res.status(500).json({ message: "Internal server error" });
+    } else {
+      res.json(rows);
+    }
+  });
 });
 
+
+
 // Add a new order
-app.post("/addOrder", async (req, res) => {
+app.post("/addOrder", (req, res) => {
   const { customer_name, item_name, quantity } = req.body;
 
   if (customer_name && item_name && quantity) {
     const date_of_order = new Date().toISOString().split("T")[0]; // Get the current date in YYYY-MM-DD format
     const date_of_delivery = ""; // Set the date_of_delivery as empty for now
 
-    try {
-      await pool.query(
-        "INSERT INTO orders (customer_name, item_name, date_of_order, quantity, date_of_delivery) VALUES ($1, $2, $3, $4, $5)",
-        [customer_name, item_name, date_of_order, quantity, date_of_delivery]
-      );
-      res.status(200).json({ message: "Order created successfully" });
-    } catch (err) {
-      console.error("Error during order creation:", err);
-      res.status(500).json({ message: "Internal server error" });
-    }
+    db.run(
+      "INSERT INTO orders (customer_name, item_name, date_of_order, quantity, date_of_delivery) VALUES (?, ?, ?, ?, ?)",
+      [customer_name, item_name, date_of_order, quantity, date_of_delivery],
+      function (err) {
+        if (err) {
+          console.error("Error during order creation:", err);
+          res.status(500).json({ message: "Internal server error" });
+        } else {
+          res.status(200).json({ message: "Order created successfully" });
+        }
+      }
+    );
   } else {
     res.status(400).json({ message: "Invalid order details" });
   }
 });
 
-// Add a new order (duplicate route with different parameters)
-app.post("/addOrder", async (req, res) => {
+
+
+// Add a new order
+app.post("/addOrder", (req, res) => {
   const { customerName, chemicalName, dateOfOrder, dateOfDelivery } = req.body;
 
   if (customerName && chemicalName && dateOfOrder && dateOfDelivery) {
-    try {
-      await pool.query(
-        "INSERT INTO orders (customer_name, chemical_name, date_of_order, date_of_delivery) VALUES ($1, $2, $3, $4)",
-        [customerName, chemicalName, dateOfOrder, dateOfDelivery]
-      );
-      res.status(200).json({ message: "Order created successfully" });
-    } catch (err) {
-      console.error("Error during order creation:", err);
-      res.status(500).json({ message: "Internal server error" });
-    }
+    db.run(
+      "INSERT INTO orders (customer_name, chemical_name, date_of_order, date_of_delivery) VALUES (?, ?, ?, ?)",
+      [customerName, chemicalName, dateOfOrder, dateOfDelivery],
+      function (err) {
+        if (err) {
+          console.error("Error during order creation:", err);
+          res.status(500).json({ message: "Internal server error" });
+        } else {
+          res.status(200).json({ message: "Order created successfully" });
+        }
+      }
+    );
   } else {
     res.status(400).json({ message: "Invalid order details" });
   }
 });
+
+
 
 // Start the server
 const port = process.env.PORT || 3000;
