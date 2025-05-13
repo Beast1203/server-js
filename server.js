@@ -10,7 +10,7 @@ app.use(bodyParser.urlencoded({ extended: true }));
 app.use(cors()); // Enable CORS for all routes
 
 const dbPath = path.join(__dirname, "data.db"); // Path to the SQLite database file
-
+//database connection
 const db = new sqlite3.Database(dbPath);
 
 // Check and update table structure
